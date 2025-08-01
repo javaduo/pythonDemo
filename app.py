@@ -250,7 +250,7 @@ WEIXIN_APPID = "wxc0c051408ae52cf2"  # 替换为你的微信公众号appid
 WEIXIN_SECRET = "f0f46eeaae3a02ac3372e18e3aa3f84a"  # 替换为你的微信公众号secret
 
 # 菜单URL配置
-MENU_URL = "http://z4ba565a.natappfree.cc/orders_page"
+MENU_URL = "http://yef9f628.natappfree.cc/orders_page"
 
 def verify_weixin_signature(signature, timestamp, nonce):
     """
@@ -510,7 +510,7 @@ SIMPLE_HTML_TEMPLATE = """
             .header h1 {
                 font-size: 1.6rem;
             }
-            
+
             .shop-item {
                 max-width: 700px;
                 margin: 0 auto 15px;
@@ -600,7 +600,7 @@ SIMPLE_HTML_TEMPLATE = """
             const refreshBtn = document.querySelector('.refresh-btn');
             refreshBtn.innerHTML = '<span class="loading"></span>刷新中';
             refreshBtn.disabled = true;
-            
+
             setTimeout(() => {
                 location.reload();
             }, 300);
