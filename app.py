@@ -130,6 +130,7 @@ class OrderFetcher:
             logging.error("获取菜单详情失败，状态码: %d，菜单ID: %s", response.status_code, order_id)
         return []
 
+    # 修改 get_order_details 方法中的总数量计算
     def get_order_details(self, order_id):
         """获取菜单详情"""
         detail_url = f"{self.detail_url}{order_id}?t={random.random()}"
@@ -170,6 +171,10 @@ class OrderFetcher:
         no_value = no.get("value") if no and no.has_attr("value") else "未知单据编号"
 
         items = self.fetch_order_items(order_id)
+
+        # 计算商品种类数量（个数）
+        item_count = len(items)
+
         result_parts = []
         for item in items:
             description = item.get('description', '')
@@ -185,9 +190,13 @@ class OrderFetcher:
             "仓库编号": selected_value,
             "门店": shop_name,
             "仓库": warehouse,
-            "菜单内容": full_result
+            "菜单内容": full_result,
+            "总数量": item_count  # 商品种类个数
         }
 
+
+
+    # 修改 OrderFetcher 类中的 get_filtered_orders 方法
     def get_filtered_orders(self):
         """对外接口：获取并返回格式化菜单信息，封装为 ResultVO，并按门店、仓库分组"""
         if not self.login():
@@ -205,9 +214,11 @@ class OrderFetcher:
             if order_detail:
                 shop_name = order_detail.get("门店")
                 creator = order_detail.get("仓库")
+                # 修改这里：添加总数量字段
                 order_info = {
                     "菜单编号": order_detail["菜单编号"],
-                    "菜单内容": order_detail["菜单内容"]
+                    "菜单内容": order_detail["菜单内容"],
+                    "总数量": order_detail["总数量"]  # 添加总数量字段
                 }
 
                 if shop_name not in grouped_orders:
@@ -241,6 +252,7 @@ class OrderFetcher:
         return ResultVO(code=200, message="成功获取菜单并按门店和仓库分组", data=result_data).to_dict()
 
 
+
 # Flask应用
 app = Flask(__name__)
 
@@ -250,7 +262,7 @@ WEIXIN_APPID = "wxc0c051408ae52cf2"  # 替换为你的微信公众号appid
 WEIXIN_SECRET = "f0f46eeaae3a02ac3372e18e3aa3f84a"  # 替换为你的微信公众号secret
 
 # 菜单URL配置
-MENU_URL = "http://yef9f628.natappfree.cc/orders_page"
+MENU_URL = "http://q66b28d3.natappfree.cc/orders_page"
 
 def verify_weixin_signature(signature, timestamp, nonce):
     """
@@ -438,6 +450,15 @@ SIMPLE_HTML_TEMPLATE = """
             border-bottom: 1px dashed #ddd;
         }
 
+        .order-quantity {
+            font-weight: 500;
+            color: #e91e63;
+            font-size: 0.9rem;
+            background: #fce4ec;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        
         .order-number {
             font-weight: 600;
             color: #1976d2;
@@ -547,7 +568,10 @@ SIMPLE_HTML_TEMPLATE = """
                                             <div class="order-item">
                                                 <div class="order-header">
                                                     <div class="order-number">📋 {{ order.菜单编号 }}</div>
-                                                </div>
+                                                    {% if order.总数量 %}
+                                                    <div class="order-quantity">总计: {{ order.总数量 }}</div>
+                                                    {% endif %}
+                                                </div>  
                                                 <div class="order-content">
                                                     {% set content_lines = order.菜单内容.split('\n') %}
                                                     {% for line in content_lines %}
