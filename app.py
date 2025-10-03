@@ -242,7 +242,8 @@ class OrderFetcher:
                     }
                     for creator, orders_list in creators.items()
                 ],
-                "菜单总数": sum(len(orders_list) for orders_list in creators.values())  # 添加门店总菜单数
+                "菜单总数": sum(len(orders_list) for orders_list in creators.values()),  # 添加门店总菜单数，
+                "total_quantity": sum(sum(order.get("总数量", 0) for order in orders_list) for orders_list in creators.values())  # 添加门店总商品数量
             }
             result_data.append(shop_entry)
 
@@ -553,7 +554,7 @@ SIMPLE_HTML_TEMPLATE = """
                 <div class="shop-item">
                     <div class="shop-header">
                         <span>🏪</span>
-                        <span>{{ shop.门店 }} ({{ shop.菜单总数 }})</span>
+                        <span>{{ shop.门店 }} ({{ shop.菜单总数 }}个菜单, 总计: {{ shop.total_quantity }})</span>
                     </div>
                     <div class="warehouse-list">
                         {% for warehouse in shop.仓库列表 %}
