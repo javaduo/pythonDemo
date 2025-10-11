@@ -8,6 +8,10 @@ from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request, render_template_string
 import hashlib
 from xml.etree import ElementTree as ET
+import concurrent.futures
+from functools import partial
+import time
+import functools
 
 # 设置日志
 logging.basicConfig(
@@ -47,6 +51,28 @@ class OrderFetcher:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"
         }
 
+        # 添加缓存字典
+        self._cache = {}
+        self._cache_timeout = 300  # 5分钟缓存
+
+    def _get_cache_key(self, *args):
+        """生成缓存键"""
+        return hash(str(args))
+
+    def _get_from_cache(self, key):
+        """从缓存获取数据"""
+        if key in self._cache:
+            data, timestamp = self._cache[key]
+            if time.time() - timestamp < self._cache_timeout:
+                return data
+            else:
+                del self._cache[key]
+        return None
+
+    def _set_cache(self, key, data):
+        """设置缓存数据"""
+        self._cache[key] = (data, time.time())
+
     def login(self):
         """登录并维持会话"""
         response = self.session.post(self.login_url, data=self.login_data, headers=self.headers, allow_redirects=False)
@@ -56,32 +82,46 @@ class OrderFetcher:
             self.session.get(full_url)
         return response.status_code == 200
 
-    def fetch_orders(self):
+
+    def fetch_orders(self, target_date=None):
         """获取菜单并过滤"""
-        today = datetime.today()
-        monday = today - timedelta(days=today.weekday())
-        sunday = monday + timedelta(days=6)
-        data1 = monday.strftime('%Y-%m-%d')
-        data2 = sunday.strftime('%Y-%m-%d')
+        if target_date is None:
+            # 默认查询当天
+            target_date = datetime.today()
+        else:
+            target_date = datetime.strptime(target_date, '%Y-%m-%d')
+
+        # 构建日期范围条件对象
+        data1 = target_date.strftime('%Y-%m-%d')
+        data2 = target_date.strftime('%Y-%m-%d')
+
+        condition = {
+            "name": "setDate",
+            "type": "range",
+            "key": "setDate",
+            "data1": data1,
+            "data1Type": "",
+            "data2": data2,
+            "data2Type": ""
+        }
+
+        # 模拟页面行为：先对条件对象进行JSON.stringify，再放入数组
+        condition_str = json.dumps(condition, ensure_ascii=False)
+        # 获取过滤条件（模拟getFilterCondition）
+        filter_conditions = [condition_str]
+        filter_param = json.dumps(filter_conditions, ensure_ascii=False)
 
         data = {
             'searchFields': 'no,description',
             'storeId': '',
-            'filter': json.dumps([{
-                "name": "setDate",
-                "type": "range",
-                "key": "setDate",
-                "data1": data1,
-                "data1Type": "",
-                "data2": data2,
-                "data2Type": ""
-            }]),
+            'filter': filter_param,
             '_search': 'false',
-            'rows': '20',
+            'rows': '99',
             'page': '1',
             'sidx': '',
             'sord': 'asc',
-            'keyword': ''
+            'keyword': '',
+            'warehouseId': ''
         }
 
         params = {
@@ -96,18 +136,23 @@ class OrderFetcher:
             try:
                 json_data = response.json()
                 rows = json_data.get('rows', [])
-                today_date = datetime.today().date()
-                filter_time = datetime.strptime(f"{today_date} 19:00:00", "%Y-%m-%d %H:%M:%S")
+                target_date_str = target_date.strftime('%Y-%m-%d')
 
-                return [
+                # 过滤出当天19点之后的数据
+                filter_time_str = f"{target_date_str} 19:00:00"
+                filtered_rows = [
                     row for row in rows
-                    if datetime.strptime(row['createDate'], "%Y-%m-%d %H:%M:%S") > filter_time
+                    if row.get('createDate', '') > filter_time_str and
+                       row.get('setDate', '').startswith(target_date_str)
                 ]
+
+                return filtered_rows
             except requests.exceptions.JSONDecodeError:
                 logging.error("菜单列表响应不是有效的 JSON")
         else:
             logging.error("菜单列表请求失败，状态码: %d", response.status_code)
         return []
+
 
     def fetch_order_items(self, order_id):
         """获取菜单明细数据"""
@@ -130,9 +175,20 @@ class OrderFetcher:
             logging.error("获取菜单详情失败，状态码: %d，菜单ID: %s", response.status_code, order_id)
         return []
 
+    @functools.lru_cache(maxsize=128)
+    def fetch_order_items_cached(self, order_id):
+        """带缓存的订单明细获取方法"""
+        return self.fetch_order_items(order_id)
+
     # 修改 get_order_details 方法中的总数量计算
     def get_order_details(self, order_id):
         """获取菜单详情"""
+        # 检查缓存
+        cache_key = f"order_detail_{order_id}"
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result:
+            return cached_result
+
         detail_url = f"{self.detail_url}{order_id}?t={random.random()}"
         response = self.session.get(detail_url)
 
@@ -170,7 +226,8 @@ class OrderFetcher:
         no = soup.find("input", id="no")
         no_value = no.get("value") if no and no.has_attr("value") else "未知单据编号"
 
-        items = self.fetch_order_items(order_id)
+        # 使用缓存版本获取订单明细
+        items = self.fetch_order_items_cached(order_id)
 
         # 计算商品种类数量（个数）
         item_count = len(items)
@@ -185,7 +242,7 @@ class OrderFetcher:
 
         full_result = ",".join(result_parts)
 
-        return {
+        result = {
             "菜单编号": no_value,
             "仓库编号": selected_value,
             "门店": shop_name,
@@ -194,40 +251,62 @@ class OrderFetcher:
             "总数量": item_count  # 商品种类个数
         }
 
+        # 设置缓存
+        self._set_cache(cache_key, result)
 
+        return result
+
+    def process_order_detail(self, row):
+        """处理单个订单详情的辅助方法"""
+        order_id = row.get('id')
+        if not order_id:
+            return None
+        order_detail = self.get_order_details(order_id)
+        if order_detail:
+            order_detail["制单时间"] = row.get('setDate', '未知')
+            return order_detail
+        return None
 
     # 修改 OrderFetcher 类中的 get_filtered_orders 方法
-    def get_filtered_orders(self):
+    def get_filtered_orders(self, target_date=None):
         """对外接口：获取并返回格式化菜单信息，封装为 ResultVO，并按门店、仓库分组"""
         if not self.login():
             logging.error("登录失败")
             return ResultVO(code=401, message="登录失败").to_dict()
 
-        orders = self.fetch_orders()
-        grouped_orders = {}  # 挌门店 -> 仓库 分组
+        orders = self.fetch_orders(target_date)
 
-        for row in orders:
-            order_id = row.get('id')
-            if not order_id:
-                continue
-            order_detail = self.get_order_details(order_id)
-            if order_detail:
-                shop_name = order_detail.get("门店")
-                creator = order_detail.get("仓库")
-                # 修改这里：添加总数量字段
-                order_info = {
-                    "菜单编号": order_detail["菜单编号"],
-                    "菜单内容": order_detail["菜单内容"],
-                    "总数量": order_detail["总数量"]  # 添加总数量字段
-                }
+        # 使用线程池并行处理订单详情获取
+        order_details = []
+        if orders:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # 创建偏函数以便传递额外参数
+                process_order_partial = partial(self.process_order_detail)
+                order_details = list(executor.map(process_order_partial, orders))
 
-                if shop_name not in grouped_orders:
-                    grouped_orders[shop_name] = {}
+            # 过滤掉处理失败的订单
+            order_details = [detail for detail in order_details if detail is not None]
 
-                if creator not in grouped_orders[shop_name]:
-                    grouped_orders[shop_name][creator] = []
+        grouped_orders = {}  # 按门店 -> 仓库 分组
 
-                grouped_orders[shop_name][creator].append(order_info)
+        for order_detail in order_details:
+            shop_name = order_detail.get("门店")
+            creator = order_detail.get("仓库")
+            # 修改这里：添加总数量字段和制单时间
+            order_info = {
+                "菜单编号": order_detail["菜单编号"],
+                "菜单内容": order_detail["菜单内容"],
+                "总数量": order_detail["总数量"],  # 添加总数量字段
+                "制单时间": order_detail["制单时间"]  # 添加制单时间
+            }
+
+            if shop_name not in grouped_orders:
+                grouped_orders[shop_name] = {}
+
+            if creator not in grouped_orders[shop_name]:
+                grouped_orders[shop_name][creator] = []
+
+            grouped_orders[shop_name][creator].append(order_info)
 
         # 转换为最终格式
         result_data = []
@@ -362,6 +441,8 @@ SIMPLE_HTML_TEMPLATE = """
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
         .header h1 {
@@ -370,6 +451,27 @@ SIMPLE_HTML_TEMPLATE = """
             display: flex;
             align-items: center;
             gap: 10px;
+        }
+
+        .date-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255,255,255,0.2);
+            padding: 5px 10px;
+            border-radius: 20px;
+        }
+
+        .date-selector label {
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+
+        .date-selector input {
+            border: none;
+            padding: 5px;
+            border-radius: 4px;
+            font-size: 0.9rem;
         }
 
         .refresh-btn {
@@ -543,9 +645,15 @@ SIMPLE_HTML_TEMPLATE = """
 <body>
     <div class="header">
         <h1>📦 菜单查询</h1>
-        <button class="refresh-btn" onclick="refreshData()">
-            <span id="refresh-text">🔄 刷新</span>
-        </button>
+        <form id="dateForm" style="display: flex; gap: 10px;">
+            <div class="date-selector">
+                <label for="date">选择日期:</label>
+                <input type="date" id="date" name="date" value="{{ selected_date }}">
+            </div>
+            <button class="refresh-btn" type="submit">
+                <span id="refresh-text">🔍 查询</span>
+            </button>
+        </form>
     </div>
 
     <div class="shop-list">
@@ -568,7 +676,12 @@ SIMPLE_HTML_TEMPLATE = """
                                         {% for order in warehouse.菜单列表 %}
                                             <div class="order-item">
                                                 <div class="order-header">
-                                                    <div class="order-number">📋 {{ order.菜单编号 }}</div>
+                                                    <div>
+                                                        <div class="order-number">📋 {{ order.菜单编号 }}</div>
+                                                        {% if order.制单时间 %}
+                                                        <div style="font-size: 0.8rem; color: #666;">制单时间: {{ order.制单时间 }}</div>
+                                                        {% endif %}
+                                                    </div>
                                                     {% if order.总数量 %}
                                                     <div class="order-quantity">总计: {{ order.总数量 }}</div>
                                                     {% endif %}
@@ -621,15 +734,20 @@ SIMPLE_HTML_TEMPLATE = """
     </div>
 
     <script>
-        function refreshData() {
-            const refreshBtn = document.querySelector('.refresh-btn');
-            refreshBtn.innerHTML = '<span class="loading"></span>刷新中';
-            refreshBtn.disabled = true;
-
-            setTimeout(() => {
-                location.reload();
-            }, 300);
-        }
+        // 设置默认日期为今天
+        document.addEventListener('DOMContentLoaded', function() {
+            const dateInput = document.getElementById('date');
+            if (dateInput && !dateInput.value) {
+                dateInput.valueAsDate = new Date();
+            }
+            
+            // 如果URL中有日期参数，则使用该日期
+            const urlParams = new URLSearchParams(window.location.search);
+            const dateParam = urlParams.get('date');
+            if (dateParam && dateInput) {
+                dateInput.value = dateParam;
+            }
+        });
     </script>
 </body>
 </html>
@@ -819,8 +937,9 @@ def get_orders():
     """
     直接获取菜单数据的API接口
     """
+    target_date = request.args.get('date')
     fetcher = OrderFetcher()
-    result = fetcher.get_filtered_orders()
+    result = fetcher.get_filtered_orders(target_date)
     return jsonify(result)
 
 @app.route('/orders_page', methods=['GET'])
@@ -828,14 +947,16 @@ def get_orders_page():
     """
     获取菜单数据并以网页形式展示
     """
+    target_date = request.args.get('date')
     fetcher = OrderFetcher()
-    result = fetcher.get_filtered_orders()
+    result = fetcher.get_filtered_orders(target_date)
     formatted_result = format_orders_for_display(result)
 
     return render_template_string(
         SIMPLE_HTML_TEMPLATE,
         data=formatted_result,
-        current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        selected_date=target_date or datetime.now().strftime("%Y-%m-%d")
     )
 
 @app.route('/create_menu', methods=['GET'])
